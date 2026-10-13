@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Portal Kampus Fiktif - Lab Keamanan</title>
+<!--
+  ============================================================
+  PORTAL UNIVERSITAS NUSANTARA RAYA (FIKTIF) - VULNERABLE BY DESIGN
+  ============================================================
+  Aplikasi ini SENGAJA rentan untuk lab edukasi keamanan web.
+  Semua data 100% sintetis. JANGAN pernah memakai data nyata,
+  dan JANGAN menyalin pola kode "VULN" ke aplikasi produksi.
+
+  Deploy ke Netlify: taruh file ini bernama index.html dalam satu
+  folder, lalu drag-and-drop folder ke app.netlify.com/drop.
+
+  Kerentanan (cari komentar "VULN-" dan "REMEDIASI"):
+   VULN-1  Validasi unggah berkas lemah (hanya cek string di client)
+   VULN-2  Broken Access Control (role disimpan & dipercaya dari localStorage)
+   VULN-3  (bonus) Password fiktif disimpan plaintext di localStorage
+-->
+<script src="https://cdn.tailwindcss.com/3.4.17"></script>
+<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;600;800&display=swap" rel="stylesheet">
+<style>
+  body{font-family:'Plus Jakarta Sans',system-ui,sans-serif;background:#EEF2F6;color:#0F2A43}
+  :focus-visible{outline:3px solid #E9A93B;outline-offset:2px}
+  .btn{background:#0F2A43;color:#fff;border-radius:.5rem;padding:.55rem 1rem;font-weight:600}
+  .btn:hover{background:#1c4468}
+  .btn-alt{background:#1F7A6D}.btn-alt:hover{background:#186358}
+  .btn-danger{background:#B3302A}.btn-danger:hover{background:#8f2621}
+  .inp{width:100%;border:1px solid #b9c5d1;border-radius:.5rem;padding:.5rem .75rem;background:#fff}
+  th{text-align:left;font-weight:600;padding:.5rem;border-bottom:2px solid #0F2A43}
+  td{padding:.5rem;border-bottom:1px solid #d5dde5}
+  .card{background:#fff;border-radius:.75rem;padding:1.25rem;border:1px solid #d5dde5}
+</style>
+</head>
+<body>
+<div class="bg-[#B3302A] text-white text-sm text-center py-1.5 px-3">
+  Lab keamanan: aplikasi ini sengaja rentan dan seluruh datanya fiktif. Jangan masukkan data pribadi.
+</div>
+<div id="app"></div>
+
+<script>
+/* ---------- Data & penyimpanan ---------- */
+const KEY = 'kampus_lab_db';
+const SESS = 'kampus_lab_session';
+const MK = ['Algoritma', 'Basis Data', 'Jaringan Komputer', 'Statistika'];
+
+function seed() {
+  const users = [
+    { u: 'mhs01', p: 'demo123', n: 'Alya Prameswari', r: 'mahasiswa', nim: '2024001' },
+    { u: 'mhs02', p: 'demo123', n: 'Bima Saputra', r: 'mahasiswa', nim: '2024002' },
+    { u: 'dosen01', p: 'demo123', n: 'Dr. Citra Wulandari', r: 'dosen' },
+    { u: 'admin01', p: 'demo123', n: 'Admin Kampus', r: 'admin' }
+  ];
+  const nilai = [88, 76, 81, 69, 72, 90, 64, 85];
+  const grades = [];
+  users.filter(x => x.r === 'mahasiswa').forEach((m, i) =>
+    MK.forEach((mk, j) => grades.push({ nim: m.nim, mk, nilai: nilai[i * 4 + j] })));
+  return {
+    users, grades, tasks: [],
+    posts: [{ id: 1, u: 'dosen01', n: 'Dr. Citra Wulandari', r: 'dosen', text: 'Selamat datang di forum. Tanyakan materi minggu ini di sini.', ts: Date.now() }]
+  };
+}
+// VULN-3: password disimpan plaintext. REMEDIASI: simpan hash (bcrypt/argon2) di server, jangan di browser.
+let db = JSON.parse(localStorage.getItem(KEY) || 'null') || seed();
+const save = () => localStorage.setItem(KEY, JSON.stringify(db));
+save();
+
+/* ---------- Sesi ---------- */
+/*
+  VULN-2: Broken Access Control / client-side state manipulation.
+  Role disimpan sebagai JSON mentah di localStorage dan dipercaya begitu saja.
+  Siapa pun bisa membuka DevTools > Application > Local Storage dan mengubah
+  "role" menjadi "admin" atau "dosen", lalu memuat ulang halaman.
+  REMEDIASI: autentikasi dan otorisasi harus di server. Gunakan token sesi
+  (cookie HttpOnly + Secure + SameSite) atau JWT bertanda tangan, dan server
+  memeriksa role di setiap request API. Pemeriksaan di JS hanya untuk UX.
+*/
+const getSess = () => { try { return JSON.parse(localStorage.getItem(SESS)); } catch (e) { return null; } };
+const setSess = o => localStorage.setItem(SESS, JSON.stringify(o));
+
+const VIEWS = {
+  dash:  { t: 'Dasbor', r: ['mahasiswa', 'dosen', 'admin'] },
+  nilai: { t: 'Nilai dan transkrip', r: ['mahasiswa'] },
+  tugas: { t: 'Unggah tugas', r: ['mahasiswa'] },
+  forum: { t: 'Forum diskusi', r: ['mahasiswa', 'dosen', 'admin'] },
+  input: { t: 'Input nilai', r: ['dosen'] },
+  akun:  { t: 'Kelola akun', r: ['admin'] }
+};
+let view = 'dash';
+
+/* ---------- Util ---------- */
+const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const huruf = n => n >= 85 ? ['A', 4] : n >= 75 ? ['B', 3] : n >= 65 ? ['C', 2] : ['D', 1];
+const me = () => db.users.find(x => x.u === (getSess() || {}).u);
+const fmt = t => new Date(t).toLocaleString('id-ID');
+
+/* ---------- Render utama ---------- */
+function render() {
+  const s = getSess();
+  if (!s) return renderLogin();
+  // VULN-2: pengecekan akses hanya di client dan memakai role dari localStorage.
+  if (!VIEWS[view] || !VIEWS[view].r.includes(s.role)) view = 'dash';
+  const nav = Object.entries(VIEWS).filter(([, v]) => v.r.includes(s.role)).map(([k, v]) =>
+    `<button onclick="go('${k}')" class="text-left px-3 py-2 rounded-lg w-full ${k === view ? 'bg-white text-[#0F2A43] font-semibold' : 'text-white/90 hover:bg-white/10'}">${v.t}</button>`).join('');
+  document.getElementById('app').innerHTML = `
+  <div class="flex flex-col md:flex-row min-h-screen">
+    <aside class="bg-[#0F2A43] md:w-64 p-4 flex md:flex-col gap-4 md:gap-6 flex-wrap">
+      <div><div class="text-white font-extrabold text-lg leading-tight">Universitas<br>Nusantara Raya</div>
+      <div class="text-[#E9A93B] text-sm">Portal akademik fiktif</div></div>
+      <nav class="flex md:flex-col gap-1 flex-wrap md:flex-nowrap flex-1">${nav}</nav>
+      <div class="text-white/80 text-sm w-full md:w-auto">
+        <div class="font-semibold text-white">${esc((me() || {}).n || s.u)}</div>
+        <div>Role: ${esc(s.role)}</div>
+        <button onclick="logout()" class="underline mt-2">Keluar</button>
+        <button onclick="resetDb()" class="underline mt-2 ml-3 md:ml-0 md:block">Reset data lab</button>
+      </div>
+    </aside>
+    <main class="flex-1 p-4 md:p-8 max-w-5xl"><h1 class="text-2xl font-extrabold mb-4">${VIEWS[view].t}</h1><div id="v"></div></main>
+  </div>`;
+  ({ dash: vDash, nilai: vNilai, tugas: vTugas, forum: vForum, input: vInput, akun: vAkun })[view]();
+}
+const go = v => { view = v; render(); };
+const $v = h => document.getElementById('v').innerHTML = h;
+
+/* ---------- Login ---------- */
+function renderLogin(err = '') {
+  document.getElementById('app').innerHTML = `
+  <div class="min-h-[85vh] grid place-items-center p-4"><div class="card w-full max-w-md">
+    <h1 class="text-2xl font-extrabold">Masuk ke portal</h1>
+    <p class="text-sm text-slate-600 mb-4">Universitas Nusantara Raya (fiktif)</p>
+    ${err ? `<p class="text-[#B3302A] text-sm mb-2" role="alert">${esc(err)}</p>` : ''}
+    <label class="text-sm font-semibold" for="lu">Nama pengguna</label><input id="lu" class="inp mb-3" autocomplete="off">
+    <label class="text-sm font-semibold" for="lp">Kata sandi</label><input id="lp" type="password" class="inp mb-4">
+    <button class="btn w-full" onclick="login(lu.value, lp.value)">Masuk</button>
+    <div class="mt-5 border-t pt-4"><div class="text-sm font-semibold mb-2">Login cepat (demo)</div>
+      <div class="grid grid-cols-3 gap-2">
+        <button class="btn btn-alt text-sm" onclick="login('mhs01','demo123')">Mahasiswa</button>
+        <button class="btn btn-alt text-sm" onclick="login('dosen01','demo123')">Dosen</button>
+        <button class="btn btn-alt text-sm" onclick="login('admin01','demo123')">Admin</button>
+      </div></div>
+  </div></div>`;
+}
+function login(u, p) {
+  const x = db.users.find(a => a.u === u && a.p === p);
+  if (!x) return renderLogin('Nama pengguna atau kata sandi salah.');
+  setSess({ u: x.u, role: x.r }); // VULN-2: role ikut disimpan di sisi client
+  view = 'dash'; render();
+}
+const logout = () => { localStorage.removeItem(SESS); render(); };
+const resetDb = () => { if (confirm('Kembalikan semua data lab ke kondisi awal?')) { db = seed(); save(); localStorage.removeItem(SESS); render(); } };
+
+/* ---------- Mahasiswa ---------- */
+function vDash() {
+  const u = me() || {}, s = getSess();
+  let extra = '';
+  if (s.role === 'mahasiswa') {
+    const g = db.grades.filter(x => x.nim === u.nim);
+    const ipk = g.length ? (g.reduce((a, x) => a + huruf(x.nilai)[1], 0) / g.length).toFixed(2) : '-';
+    extra = `<div class="grid sm:grid-cols-3 gap-3 mt-4">
+      <div class="card"><div class="text-3xl font-extrabold">${ipk}</div><div class="text-sm text-slate-600">IPK sementara</div></div>
+      <div class="card"><div class="text-3xl font-extrabold">${db.tasks.filter(t => t.nim === u.nim).length}</div><div class="text-sm text-slate-600">Tugas terkirim</div></div>
+      <div class="card"><div class="text-3xl font-extrabold">${g.length}</div><div class="text-sm text-slate-600">Mata kuliah semester ini</div></div></div>`;
+  } else {
+    extra = `<div class="grid sm:grid-cols-3 gap-3 mt-4">
+      <div class="card"><div class="text-3xl font-extrabold">${db.users.length}</div><div class="text-sm text-slate-600">Akun terdaftar</div></div>
+      <div class="card"><div class="text-3xl font-extrabold">${db.tasks.length}</div><div class="text-sm text-slate-600">Tugas diunggah</div></div>
+      <div class="card"><div class="text-3xl font-extrabold">${db.posts.length}</div><div class="text-sm text-slate-600">Pesan forum</div></div></div>`;
+  }
+  $v(`<div class="card"><p>Halo, <b>${esc(u.n || s.u)}</b>. Anda masuk sebagai <b>${esc(s.role)}</b>.</p></div>${extra}`);
+}
+function vNilai() {
+  const u = me() || {}, g = db.grades.filter(x => x.nim === u.nim);
+  $v(`<div class="card overflow-x-auto"><p class="text-sm mb-2">NIM ${esc(u.nim || '-')} - ${esc(u.n || '')}</p>
+  <table class="w-full"><tr><th>Mata kuliah</th><th>Nilai</th><th>Huruf</th></tr>
+  ${g.map(x => `<tr><td>${esc(x.mk)}</td><td>${x.nilai}</td><td>${huruf(x.nilai)[0]}</td></tr>`).join('') || '<tr><td colspan="3">Belum ada nilai.</td></tr>'}</table></div>`);
+}
+
+/*
+  VULN-1: Weak File Upload Validation.
+  Validasi hanya di sisi client dan hanya mengecek apakah NAMA file mengandung
+  string ".pdf"/".docx"/".zip" (includes), bukan ekstensi akhir. Akibatnya
+  "backdoor.pdf.php" atau "x.zip.exe" lolos. Tipe MIME, magic bytes, dan ukuran
+  tidak diperiksa, dan validasi client bisa dilewati lewat DevTools atau request langsung.
+  (Di lab ini berkas tidak dieksekusi; hanya metadata yang disimpan.)
+  REMEDIASI:
+   - Validasi ulang di SERVER; jangan percaya validasi client.
+   - Ambil ekstensi AKHIR saja dan cocokkan dengan allowlist.
+   - Cek magic bytes/MIME sebenarnya, batasi ukuran, ganti nama file dengan ID acak.
+   - Simpan di luar web root / object storage non-eksekusi, kirim dengan
+     Content-Disposition: attachment dan X-Content-Type-Options: nosniff.
+*/
+function ekstensiValid(nama) {
+  const n = nama.toLowerCase();
+  return n.includes('.pdf') || n.includes('.docx') || n.includes('.zip'); // LEMAH
+}
+function vTugas() {
+  const u = me() || {};
+  const mine = db.tasks.filter(t => t.nim === u.nim);
+  $v(`<div class="card mb-4"><form onsubmit="return false">
+    <label class="text-sm font-semibold" for="tj">Judul tugas</label><input id="tj" class="inp mb-3">
+    <label class="text-sm font-semibold" for="tf">Berkas (PDF, DOCX, ZIP)</label><input id="tf" type="file" class="inp mb-3">
+    <p id="te" class="text-[#B3302A] text-sm mb-2" role="alert"></p>
+    <button class="btn" onclick="kirimTugas()">Unggah tugas</button></form></div>
+  <div class="card overflow-x-auto"><table class="w-full"><tr><th>Judul</th><th>Berkas</th><th>Ukuran</th><th>Waktu</th></tr>
+  ${mine.map(t => `<tr><td>${esc(t.judul)}</td><td>${esc(t.file)}</td><td>${t.size} B</td><td>${fmt(t.ts)}</td></tr>`).join('') || '<tr><td colspan="4">Belum ada tugas diunggah.</td></tr>'}</table></div>`);
+}
+function kirimTugas() {
+  const j = document.getElementById('tj').value.trim(), f = document.getElementById('tf').files[0], e = document.getElementById('te');
+  if (!j || !f) { e.textContent = 'Isi judul dan pilih berkas terlebih dahulu.'; return; }
+  if (!ekstensiValid(f.name)) { e.textContent = 'Ekstensi tidak diizinkan. Gunakan PDF, DOCX, atau ZIP.'; return; }
+  db.tasks.push({ id: Date.now(), nim: me().nim, judul: j, file: f.name, size: f.size, ts: Date.now() });
+  save(); vTugas();
+}
+
+/* ---------- Forum ---------- */
+function vForum() {
+  $v(`<div class="card mb-4"><label class="text-sm font-semibold" for="pt">Tulis pesan</label>
+    <textarea id="pt" rows="3" class="inp mb-2"></textarea><button class="btn" onclick="kirimPost()">Kirim pesan</button></div>
+  ${db.posts.slice().reverse().map(p => `<div class="card mb-3"><div class="text-sm text-slate-600"><b>${esc(p.n)}</b> (${esc(p.r)}) - ${fmt(p.ts)}</div><p class="mt-1">${esc(p.text)}</p></div>`).join('')}`);
+}
+function kirimPost() {
+  const t = document.getElementById('pt').value.trim(); if (!t) return;
+  const u = me() || {};
+  db.posts.push({ id: Date.now(), u: u.u, n: u.n, r: u.r, text: t, ts: Date.now() });
+  save(); vForum();
+}
+
+/* ---------- Dosen ---------- */
+function vInput() {
+  const nm = n => (db.users.find(x => x.nim === n) || {}).n || n;
+  $v(`<div class="card overflow-x-auto"><table class="w-full"><tr><th>NIM</th><th>Mahasiswa</th><th>Mata kuliah</th><th>Nilai</th><th></th></tr>
+  ${db.grades.map((g, i) => `<tr><td>${esc(g.nim)}</td><td>${esc(nm(g.nim))}</td><td>${esc(g.mk)}</td>
+    <td><input id="n${i}" type="number" min="0" max="100" value="${g.nilai}" class="inp !w-24" aria-label="Nilai ${esc(g.mk)}"></td>
+    <td><button class="btn btn-alt text-sm" onclick="simpanNilai(${i})">Simpan nilai</button></td></tr>`).join('')}</table></div>`);
+}
+function simpanNilai(i) {
+  const v = Number(document.getElementById('n' + i).value);
+  if (isNaN(v) || v < 0 || v > 100) return alert('Nilai harus 0 sampai 100.');
+  db.grades[i].nilai = v; save(); vInput();
+}
+
+/* ---------- Admin ---------- */
+function vAkun() {
+  const me_ = getSess().u;
+  $v(`<div class="card mb-4"><div class="grid sm:grid-cols-5 gap-2 items-end">
+    <div><label class="text-sm font-semibold" for="au">Pengguna</label><input id="au" class="inp"></div>
+    <div><label class="text-sm font-semibold" for="an">Nama</label><input id="an" class="inp"></div>
+    <div><label class="text-sm font-semibold" for="ap">Kata sandi</label><input id="ap" class="inp" value="demo123"></div>
+    <div><label class="text-sm font-semibold" for="ar">Role</label><select id="ar" class="inp"><option>mahasiswa</option><option>dosen</option><option>admin</option></select></div>
+    <button class="btn" onclick="tambahAkun()">Tambah akun</button></div>
+    <p id="ae" class="text-[#B3302A] text-sm mt-2" role="alert"></p></div>
+  <div class="card overflow-x-auto"><table class="w-full"><tr><th>Pengguna</th><th>Nama</th><th>Role</th><th></th></tr>
+  ${db.users.map(x => `<tr><td>${esc(x.u)}</td><td>${esc(x.n)}</td><td>${esc(x.r)}</td>
+    <td>${x.u === me_ ? '' : `<button class="btn btn-danger text-sm" onclick="hapusAkun('${esc(x.u)}')">Hapus akun</button>`}</td></tr>`).join('')}</table></div>`);
+}
+function tambahAkun() {
+  const u = au.value.trim(), n = an.value.trim(), p = ap.value, r = ar.value, e = document.getElementById('ae');
+  if (!u || !n || !p) { e.textContent = 'Lengkapi pengguna, nama, dan kata sandi.'; return; }
+  if (db.users.some(x => x.u === u)) { e.textContent = 'Nama pengguna sudah dipakai.'; return; }
+  const o = { u, n, p, r };
+  if (r === 'mahasiswa') o.nim = String(2024000 + db.users.length + 1);
+  db.users.push(o); save(); vAkun();
+}
+function hapusAkun(u) {
+  if (!confirm('Hapus akun ' + u + '?')) return;
+  db.users = db.users.filter(x => x.u !== u); save(); vAkun();
+}
+
+render();
+</script>
+</body>
+</html>
